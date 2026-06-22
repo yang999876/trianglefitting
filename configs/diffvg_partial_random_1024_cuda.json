@@ -1,0 +1,23 @@
+{
+  "input": "assets/linaiya.png",
+  "init_json": "assets/linaiya.json",
+  "output": "out/diffvg_partial_random_1024_cuda",
+  "steps": 300,
+  "work_size": 1024,
+  "device": "cuda",
+  "max_triangles": 300,
+  "metrics_every": 50,
+  "progress_every": 100,
+  "samples": 1,
+  "geometry_lr": 0.1,
+  "color_lr": 0.01,
+  "init_mode": "partial_random",
+  "jitter_std": 0.015,
+  "jitter_color_std": 0.03,
+  "reinit_fraction": 0.25,
+  "random_color_mode": "target",
+  "random_alpha": 0.5,
+  "random_min_size": 0.02,
+  "random_max_size": 0.15,
+  "seed": 1234
+}

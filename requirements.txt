@@ -1,0 +1,11 @@
+﻿torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+Pillow>=9.0
+lpips>=0.1.4
+pytest>=7.0
+svgpathtools>=1.7
+cssutils>=2.0
+scikit-image>=0.25
+matplotlib>=3.10
+pybind11>=3.0

@@ -1,0 +1,20 @@
+{
+  "input": "assets/linaiya.png",
+  "init_json": "assets/linaiya.json",
+  "output": "out/diffvg_random_1024_cuda",
+  "steps": 50,
+  "work_size": 1024,
+  "device": "cuda",
+  "max_triangles": 300,
+  "metrics_every": 10,
+  "progress_every": 25,
+  "samples": 1,
+  "geometry_lr": 0.1,
+  "color_lr": 0.01,
+  "init_mode": "random",
+  "random_color_mode": "target",
+  "random_alpha": 0.5,
+  "random_min_size": 0.02,
+  "random_max_size": 0.15,
+  "seed": 1234
+}

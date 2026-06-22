@@ -1,0 +1,18 @@
+{
+  "input": "assets/linaiya.png",
+  "init_json": "assets/linaiya.json",
+  "output": "out/diffvg_jitter_1024_cuda",
+  "steps": 300,
+  "work_size": 1024,
+  "device": "cuda",
+  "max_triangles": 300,
+  "metrics_every": 50,
+  "progress_every": 100,
+  "samples": 1,
+  "geometry_lr": 0.1,
+  "color_lr": 0.01,
+  "init_mode": "jitter",
+  "jitter_std": 0.03,
+  "jitter_color_std": 0.03,
+  "seed": 1234
+}

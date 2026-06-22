@@ -1,0 +1,23 @@
+﻿[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triangle-fitting-experiments"
+version = "0.1.0"
+description = "Standalone triangle fitting experiments extracted from geometrize"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+  "torch>=2.0",
+  "torchvision>=0.15",
+  "numpy>=1.24",
+  "Pillow>=9.0",
+  "lpips>=0.1.4",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["trianglefit*"]
