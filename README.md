@@ -1,4 +1,6 @@
-﻿# Triangle Fitting Experiments
+# Triangle Fitting Experiments
+
+Use triangles to fit anime images.
 
 Standalone extraction of the image fitting experiments from `geometrize`.
 
