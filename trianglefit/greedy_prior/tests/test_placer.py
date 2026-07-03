@@ -107,6 +107,7 @@ class GreedyPlacerTests(unittest.TestCase):
                         "num_triangles": 12,
                         "candidate_count": 64,
                         "background_rgb": [255, 255, 255],
+                        "attention_mask": "out/attention/attention_mask.pt",
                         "shape_bounds": [0.1, 0.2, 0.8, 0.9],
                     }
                 ),
@@ -119,6 +120,7 @@ class GreedyPlacerTests(unittest.TestCase):
         self.assertEqual(args.num_triangles, 5)
         self.assertEqual(args.candidate_count, 64)
         self.assertEqual(args.background_rgb, [255, 255, 255])
+        self.assertEqual(args.attention_mask, "out/attention/attention_mask.pt")
         self.assertEqual(args.shape_bounds, [0.1, 0.2, 0.8, 0.9])
 
 

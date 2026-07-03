@@ -89,6 +89,8 @@ __device__ __forceinline__ bool add_edge_intersection(
 __device__ void score_triangle_block(
     const float* __restrict__ target,
     const float* __restrict__ current,
+    const float* __restrict__ attention,
+    const bool has_attention,
     const float current_sse,
     const int h,
     const int w,
@@ -109,7 +111,7 @@ __device__ void score_triangle_block(
   const float sin_theta = sinf(theta);
   const int pixels = h * w;
 
-  float local_count = 0.0f;
+  float local_weight = 0.0f;
   float local_sum_r = 0.0f;
   float local_sum_g = 0.0f;
   float local_sum_b = 0.0f;
@@ -150,19 +152,20 @@ __device__ void score_triangle_block(
     const float er = tr - cr;
     const float eg = tg - cg;
     const float eb = tb - cb;
+    const float weight = has_attention ? fmaxf(attention[index], 0.0f) : 1.0f;
 
-    local_count += 1.0f;
-    local_sum_r += tr;
-    local_sum_g += tg;
-    local_sum_b += tb;
-    local_sq_r += tr * tr;
-    local_sq_g += tg * tg;
-    local_sq_b += tb * tb;
-    local_old_sse += er * er + eg * eg + eb * eb;
+    local_weight += weight;
+    local_sum_r += weight * tr;
+    local_sum_g += weight * tg;
+    local_sum_b += weight * tb;
+    local_sq_r += weight * tr * tr;
+    local_sq_g += weight * tg * tg;
+    local_sq_b += weight * tb * tb;
+    local_old_sse += weight * (er * er + eg * eg + eb * eb);
   }
 
   const int base = threadIdx.x * kValues;
-  shared[base + 0] = local_count;
+  shared[base + 0] = local_weight;
   shared[base + 1] = local_sum_r;
   shared[base + 2] = local_sum_g;
   shared[base + 3] = local_sum_b;
@@ -185,21 +188,21 @@ __device__ void score_triangle_block(
   }
 
   if (threadIdx.x == 0) {
-    const float count = shared[0];
-    *out_count = count;
-    if (count <= 0.0f) {
+    const float weight_sum = shared[0];
+    *out_count = weight_sum;
+    if (weight_sum <= 0.0f) {
       *out_score = __int_as_float(0x7f800000);
       *out_r = 0.0f;
       *out_g = 0.0f;
       *out_b = 0.0f;
     } else {
-      const float r = fminf(fmaxf(shared[1] / count, 0.0f), 1.0f);
-      const float g = fminf(fmaxf(shared[2] / count, 0.0f), 1.0f);
-      const float b = fminf(fmaxf(shared[3] / count, 0.0f), 1.0f);
+      const float r = fminf(fmaxf(shared[1] / weight_sum, 0.0f), 1.0f);
+      const float g = fminf(fmaxf(shared[2] / weight_sum, 0.0f), 1.0f);
+      const float b = fminf(fmaxf(shared[3] / weight_sum, 0.0f), 1.0f);
       const float target_sq_sum = shared[4] + shared[5] + shared[6];
       const float target_dot_color = r * shared[1] + g * shared[2] + b * shared[3];
       const float color_sq_sum = r * r + g * g + b * b;
-      const float new_sse_inside = target_sq_sum - 2.0f * target_dot_color + color_sq_sum * count;
+      const float new_sse_inside = target_sq_sum - 2.0f * target_dot_color + color_sq_sum * weight_sum;
       *out_score = current_sse - shared[7] + new_sse_inside;
       *out_r = r;
       *out_g = g;
@@ -212,6 +215,8 @@ __device__ void score_triangle_block(
 __device__ void score_triangle_block_scanline(
     const float* __restrict__ target,
     const float* __restrict__ current,
+    const float* __restrict__ attention,
+    const bool has_attention,
     const float current_sse,
     const int h,
     const int w,
@@ -235,7 +240,7 @@ __device__ void score_triangle_block_scanline(
   const int y_max = min(h - 1, static_cast<int>(floorf(max_y_f - 0.5f)));
   const int pixels = h * w;
 
-  float local_count = 0.0f;
+  float local_weight = 0.0f;
   float local_sum_r = 0.0f;
   float local_sum_g = 0.0f;
   float local_sum_b = 0.0f;
@@ -277,21 +282,22 @@ __device__ void score_triangle_block_scanline(
         const float er = tr - cr;
         const float eg = tg - cg;
         const float eb = tb - cb;
+        const float weight = has_attention ? fmaxf(attention[index], 0.0f) : 1.0f;
 
-        local_count += 1.0f;
-        local_sum_r += tr;
-        local_sum_g += tg;
-        local_sum_b += tb;
-        local_sq_r += tr * tr;
-        local_sq_g += tg * tg;
-        local_sq_b += tb * tb;
-        local_old_sse += er * er + eg * eg + eb * eb;
+        local_weight += weight;
+        local_sum_r += weight * tr;
+        local_sum_g += weight * tg;
+        local_sum_b += weight * tb;
+        local_sq_r += weight * tr * tr;
+        local_sq_g += weight * tg * tg;
+        local_sq_b += weight * tb * tb;
+        local_old_sse += weight * (er * er + eg * eg + eb * eb);
       }
     }
   }
 
   const int base = threadIdx.x * kValues;
-  shared[base + 0] = local_count;
+  shared[base + 0] = local_weight;
   shared[base + 1] = local_sum_r;
   shared[base + 2] = local_sum_g;
   shared[base + 3] = local_sum_b;
@@ -314,21 +320,21 @@ __device__ void score_triangle_block_scanline(
   }
 
   if (threadIdx.x == 0) {
-    const float count = shared[0];
-    *out_count = count;
-    if (count <= 0.0f) {
+    const float weight_sum = shared[0];
+    *out_count = weight_sum;
+    if (weight_sum <= 0.0f) {
       *out_score = __int_as_float(0x7f800000);
       *out_r = 0.0f;
       *out_g = 0.0f;
       *out_b = 0.0f;
     } else {
-      const float r = fminf(fmaxf(shared[1] / count, 0.0f), 1.0f);
-      const float g = fminf(fmaxf(shared[2] / count, 0.0f), 1.0f);
-      const float b = fminf(fmaxf(shared[3] / count, 0.0f), 1.0f);
+      const float r = fminf(fmaxf(shared[1] / weight_sum, 0.0f), 1.0f);
+      const float g = fminf(fmaxf(shared[2] / weight_sum, 0.0f), 1.0f);
+      const float b = fminf(fmaxf(shared[3] / weight_sum, 0.0f), 1.0f);
       const float target_sq_sum = shared[4] + shared[5] + shared[6];
       const float target_dot_color = r * shared[1] + g * shared[2] + b * shared[3];
       const float color_sq_sum = r * r + g * g + b * b;
-      const float new_sse_inside = target_sq_sum - 2.0f * target_dot_color + color_sq_sum * count;
+      const float new_sse_inside = target_sq_sum - 2.0f * target_dot_color + color_sq_sum * weight_sum;
       *out_score = current_sse - shared[7] + new_sse_inside;
       *out_r = r;
       *out_g = g;
@@ -341,6 +347,8 @@ __device__ void score_triangle_block_scanline(
 __global__ void score_triangles_kernel(
     const float* __restrict__ target,
     const float* __restrict__ current,
+    const float* __restrict__ attention,
+    const bool has_attention,
     const float* __restrict__ centers,
     const float* __restrict__ half_base,
     const float* __restrict__ height,
@@ -366,7 +374,7 @@ __global__ void score_triangles_kernel(
   const float sin_theta = sinf(angle);
   const int pixels = h * w;
 
-  float local_count = 0.0f;
+  float local_weight = 0.0f;
   float local_sum_r = 0.0f;
   float local_sum_g = 0.0f;
   float local_sum_b = 0.0f;
@@ -407,20 +415,21 @@ __global__ void score_triangles_kernel(
     const float er = tr - cr;
     const float eg = tg - cg;
     const float eb = tb - cb;
+    const float weight = has_attention ? fmaxf(attention[index], 0.0f) : 1.0f;
 
-    local_count += 1.0f;
-    local_sum_r += tr;
-    local_sum_g += tg;
-    local_sum_b += tb;
-    local_sq_r += tr * tr;
-    local_sq_g += tg * tg;
-    local_sq_b += tb * tb;
-    local_old_sse += er * er + eg * eg + eb * eb;
+    local_weight += weight;
+    local_sum_r += weight * tr;
+    local_sum_g += weight * tg;
+    local_sum_b += weight * tb;
+    local_sq_r += weight * tr * tr;
+    local_sq_g += weight * tg * tg;
+    local_sq_b += weight * tb * tb;
+    local_old_sse += weight * (er * er + eg * eg + eb * eb);
   }
 
   __shared__ float shared[kThreads * kValues];
   const int base = threadIdx.x * kValues;
-  shared[base + 0] = local_count;
+  shared[base + 0] = local_weight;
   shared[base + 1] = local_sum_r;
   shared[base + 2] = local_sum_g;
   shared[base + 3] = local_sum_b;
@@ -443,9 +452,9 @@ __global__ void score_triangles_kernel(
   }
 
   if (threadIdx.x == 0) {
-    const float count = shared[0];
-    counts[candidate] = count;
-    if (count <= 0.0f) {
+    const float weight_sum = shared[0];
+    counts[candidate] = weight_sum;
+    if (weight_sum <= 0.0f) {
       scores[candidate] = __int_as_float(0x7f800000);
       colors[candidate * 3 + 0] = 0.0f;
       colors[candidate * 3 + 1] = 0.0f;
@@ -453,9 +462,9 @@ __global__ void score_triangles_kernel(
       return;
     }
 
-    const float r = fminf(fmaxf(shared[1] / count, 0.0f), 1.0f);
-    const float g = fminf(fmaxf(shared[2] / count, 0.0f), 1.0f);
-    const float b = fminf(fmaxf(shared[3] / count, 0.0f), 1.0f);
+    const float r = fminf(fmaxf(shared[1] / weight_sum, 0.0f), 1.0f);
+    const float g = fminf(fmaxf(shared[2] / weight_sum, 0.0f), 1.0f);
+    const float b = fminf(fmaxf(shared[3] / weight_sum, 0.0f), 1.0f);
     colors[candidate * 3 + 0] = r;
     colors[candidate * 3 + 1] = g;
     colors[candidate * 3 + 2] = b;
@@ -463,7 +472,7 @@ __global__ void score_triangles_kernel(
     const float target_sq_sum = shared[4] + shared[5] + shared[6];
     const float target_dot_color = r * shared[1] + g * shared[2] + b * shared[3];
     const float color_sq_sum = r * r + g * g + b * b;
-    const float new_sse_inside = target_sq_sum - 2.0f * target_dot_color + color_sq_sum * count;
+    const float new_sse_inside = target_sq_sum - 2.0f * target_dot_color + color_sq_sum * weight_sum;
     scores[candidate] = current_sse - shared[7] + new_sse_inside;
   }
 }
@@ -471,6 +480,8 @@ __global__ void score_triangles_kernel(
 __global__ void search_triangles_kernel(
     const float* __restrict__ target,
     const float* __restrict__ current,
+    const float* __restrict__ attention,
+    const bool has_attention,
     const float current_sse,
     const int n,
     const int h,
@@ -532,6 +543,8 @@ __global__ void search_triangles_kernel(
   score_triangle_block_scanline(
       target,
       current,
+      attention,
+      has_attention,
       current_sse,
       h,
       w,
@@ -580,6 +593,8 @@ __global__ void search_triangles_kernel(
     score_triangle_block_scanline(
         target,
         current,
+        attention,
+        has_attention,
         current_sse,
         h,
         w,
@@ -721,6 +736,7 @@ __global__ void apply_triangle_kernel(
 std::vector<at::Tensor> score_triangles_cuda(
     at::Tensor target,
     at::Tensor current,
+    at::Tensor attention,
     at::Tensor centers,
     at::Tensor half_base,
     at::Tensor height,
@@ -729,6 +745,7 @@ std::vector<at::Tensor> score_triangles_cuda(
   const int n = static_cast<int>(centers.size(0));
   const int h = static_cast<int>(target.size(1));
   const int w = static_cast<int>(target.size(2));
+  const bool has_attention = attention.numel() > 0;
   auto options = target.options();
   at::Tensor scores = at::empty({n}, options);
   at::Tensor colors = at::empty({n, 3}, options);
@@ -740,6 +757,8 @@ std::vector<at::Tensor> score_triangles_cuda(
   score_triangles_kernel<<<n, kThreads>>>(
       target.data_ptr<float>(),
       current.data_ptr<float>(),
+      has_attention ? attention.data_ptr<float>() : nullptr,
+      has_attention,
       centers.data_ptr<float>(),
       half_base.data_ptr<float>(),
       height.data_ptr<float>(),
@@ -758,6 +777,7 @@ std::vector<at::Tensor> score_triangles_cuda(
 std::vector<at::Tensor> search_and_apply_cuda(
     at::Tensor target,
     at::Tensor current,
+    at::Tensor attention,
     double current_sse,
     int64_t candidate_count,
     int64_t mutation_count,
@@ -779,6 +799,7 @@ std::vector<at::Tensor> search_and_apply_cuda(
   const int n = static_cast<int>(candidate_count);
   const int h = static_cast<int>(target.size(1));
   const int w = static_cast<int>(target.size(2));
+  const bool has_attention = attention.numel() > 0;
   auto options = target.options();
   at::Tensor params = at::empty({n, 5}, options);
   at::Tensor colors = at::empty({n, 3}, options);
@@ -792,6 +813,8 @@ std::vector<at::Tensor> search_and_apply_cuda(
   search_triangles_kernel<<<n, kThreads>>>(
       target.data_ptr<float>(),
       current.data_ptr<float>(),
+      has_attention ? attention.data_ptr<float>() : nullptr,
+      has_attention,
       static_cast<float>(current_sse),
       n,
       h,

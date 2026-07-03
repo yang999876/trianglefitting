@@ -83,6 +83,7 @@ class TrianglePlacementConfig:
     angle_mutation_degrees: float = 16.0
     min_improvement: float = 1e-9
     background_rgb: Tuple[float, float, float] | None = None
+    attention_mask: torch.Tensor | None = None
 
     def validate(self) -> None:
         if self.num_triangles < 0:
@@ -259,8 +260,11 @@ def _triangle_masks_px(batch: TriangleBatch, grid_x: torch.Tensor, grid_y: torch
     ).to(dtype=batch.centers.dtype)
 
 
-def _image_sse(target: torch.Tensor, current: torch.Tensor) -> torch.Tensor:
-    return torch.sum((target - current) ** 2)
+def _image_sse(target: torch.Tensor, current: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    error = (target - current) ** 2
+    if attention_mask is not None:
+        error = error * attention_mask.to(device=target.device, dtype=target.dtype)
+    return torch.sum(error)
 
 
 def _rmse_from_sse(sse: float, width: int, height: int) -> float:
@@ -361,9 +365,25 @@ class HillClimbTrianglePlacer:
         background_rgb = tuple(float(value) for value in background.detach().cpu())
         target_chw = target[0]
         current_chw = current[0].contiguous()
+        attention_hw = None
+        if config.attention_mask is not None:
+            attention = config.attention_mask.detach().to(device=device, dtype=dtype)
+            if attention.ndim == 4:
+                if attention.shape[0] != 1 or attention.shape[1] != 1:
+                    raise ValueError("attention_mask must have shape [1, 1, H, W], [1, H, W], or [H, W].")
+                attention = attention[0, 0]
+            elif attention.ndim == 3:
+                if attention.shape[0] != 1:
+                    raise ValueError("attention_mask must have shape [1, 1, H, W], [1, H, W], or [H, W].")
+                attention = attention[0]
+            elif attention.ndim != 2:
+                raise ValueError("attention_mask must have shape [1, 1, H, W], [1, H, W], or [H, W].")
+            if tuple(attention.shape) != (height, width):
+                raise ValueError("attention_mask size must match target working image.")
+            attention_hw = attention.contiguous().clamp_min(0.0)
         triangles: List[PlacedTriangle] = []
         history: List[dict] = []
-        current_sse = float(_image_sse(target, current).detach().cpu().item())
+        current_sse = float(_image_sse(target, current, attention_hw).detach().cpu().item())
         initial_sse = current_sse
 
         bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y = config.shape_bounds.center_limits_px_values(width=width, height=height)
@@ -399,6 +419,7 @@ class HillClimbTrianglePlacer:
                 angle_step=angle_step,
                 seed=seed,
                 round_index=index,
+                attention_hw=attention_hw,
             )
             score = float(score_tensor.detach().cpu().item())
             improvement = current_sse - score
@@ -597,6 +618,7 @@ class HillClimbTrianglePlacer:
         grid_x: torch.Tensor,
         grid_y: torch.Tensor,
         chunk_size: int,
+        attention_hw: torch.Tensor | None = None,
     ) -> CandidateScores:
         if target_chw.is_cuda:
             try:
@@ -606,6 +628,7 @@ class HillClimbTrianglePlacer:
                     current=current,
                     current_sse=current_sse,
                     chunk_size=chunk_size,
+                    attention_hw=attention_hw,
                 )
             except Exception:
                 pass
@@ -618,6 +641,7 @@ class HillClimbTrianglePlacer:
             grid_x=grid_x,
             grid_y=grid_y,
             chunk_size=chunk_size,
+            attention_hw=attention_hw,
         )
 
     def _score_candidates_cuda(
@@ -627,6 +651,7 @@ class HillClimbTrianglePlacer:
         current: torch.Tensor,
         current_sse: torch.Tensor,
         chunk_size: int,
+        attention_hw: torch.Tensor | None = None,
     ) -> CandidateScores:
         scores: List[torch.Tensor] = []
         colors: List[torch.Tensor] = []
@@ -647,6 +672,7 @@ class HillClimbTrianglePlacer:
                 height=chunk.height,
                 theta=chunk.theta,
                 current_sse=current_sse,
+                attention_hw=attention_hw,
             )
             scores.append(chunk_scores)
             colors.append(chunk_colors)
@@ -663,8 +689,11 @@ class HillClimbTrianglePlacer:
         grid_x: torch.Tensor,
         grid_y: torch.Tensor,
         chunk_size: int,
+        attention_hw: torch.Tensor | None = None,
     ) -> CandidateScores:
         old_error = (target_chw - current).square().sum(dim=0)
+        if attention_hw is not None:
+            old_error = old_error * attention_hw
         scores: List[torch.Tensor] = []
         colors: List[torch.Tensor] = []
         counts: List[torch.Tensor] = []
@@ -677,10 +706,11 @@ class HillClimbTrianglePlacer:
                 theta=candidates.theta[start:end],
             )
             mask = _triangle_masks_px(chunk, grid_x=grid_x, grid_y=grid_y)
-            count = mask.sum(dim=(1, 2))
-            safe_count = count.clamp_min(1.0)
-            target_sum = torch.einsum("bhw,chw->bc", mask, target_chw)
-            target_sq_sum = torch.einsum("bhw,chw->bc", mask, target_sq_chw)
+            weighted_mask = mask if attention_hw is None else mask * attention_hw.view(1, *attention_hw.shape)
+            count = weighted_mask.sum(dim=(1, 2))
+            safe_count = count.clamp_min(1.0e-6)
+            target_sum = torch.einsum("bhw,chw->bc", weighted_mask, target_chw)
+            target_sq_sum = torch.einsum("bhw,chw->bc", weighted_mask, target_sq_chw)
             color = (target_sum / safe_count.view(-1, 1)).clamp(0.0, 1.0)
             old_sse_inside = torch.einsum("bhw,hw->b", mask, old_error)
             new_sse_inside = target_sq_sum.sum(dim=1)

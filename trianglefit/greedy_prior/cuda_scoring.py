@@ -127,14 +127,20 @@ def score_triangles(
     height: torch.Tensor,
     theta: torch.Tensor,
     current_sse: torch.Tensor,
+    attention_hw: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if not target_chw.is_cuda:
         raise ValueError("CUDA scoring requires CUDA tensors.")
     extension = _load_extension()
     score_value = float(current_sse.detach().cpu().item()) if isinstance(current_sse, torch.Tensor) else float(current_sse)
+    if attention_hw is None:
+        attention = torch.empty((0,), device=target_chw.device, dtype=torch.float32)
+    else:
+        attention = attention_hw.to(device=target_chw.device, dtype=torch.float32).contiguous()
     scores, colors, counts = extension.score_triangles(
         target_chw.contiguous(),
         current_chw.contiguous(),
+        attention,
         centers.contiguous(),
         half_base.contiguous(),
         height.contiguous(),
@@ -165,13 +171,19 @@ def search_and_apply(
     angle_step: float,
     seed: int,
     round_index: int,
+    attention_hw: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if not target_chw.is_cuda:
         raise ValueError("CUDA greedy search requires CUDA tensors.")
     extension = _load_extension()
+    if attention_hw is None:
+        attention = torch.empty((0,), device=target_chw.device, dtype=torch.float32)
+    else:
+        attention = attention_hw.to(device=target_chw.device, dtype=torch.float32).contiguous()
     best_params, best_color, best_score = extension.search_and_apply(
         target_chw.contiguous(),
         current_chw.contiguous(),
+        attention,
         float(current_sse),
         int(candidate_count),
         int(mutation_count),

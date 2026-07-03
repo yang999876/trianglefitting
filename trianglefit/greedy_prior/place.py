@@ -7,6 +7,7 @@ import sys
 from typing import List
 
 import torch
+import torch.nn.functional as F
 
 from .placer import (
     HillClimbTrianglePlacer,
@@ -26,6 +27,46 @@ def resolve_device(device_arg: str) -> torch.device:
     return torch.device(device_arg)
 
 
+def load_attention_mask(path: str | None, height: int, width: int, device: torch.device) -> torch.Tensor | None:
+    if path is None:
+        return None
+    mask_path = Path(path)
+    if mask_path.suffix.lower() == ".pt":
+        mask = torch.load(mask_path, map_location="cpu", weights_only=False)
+        if not isinstance(mask, torch.Tensor):
+            raise ValueError("attention_mask .pt file must contain a torch.Tensor.")
+    elif mask_path.suffix.lower() == ".npy":
+        import numpy as np
+
+        mask = torch.from_numpy(np.load(mask_path))
+    else:
+        from PIL import Image
+        import numpy as np
+
+        image = Image.open(mask_path).convert("F")
+        mask = torch.from_numpy(np.asarray(image, dtype="float32"))
+        if float(mask.max().item()) > 1.0:
+            mask = mask / 255.0
+        mask = 1.0 + mask
+
+    mask = mask.to(dtype=torch.float32)
+    while mask.ndim > 2 and mask.shape[0] == 1:
+        mask = mask[0]
+    if mask.ndim == 3:
+        if mask.shape[0] in (1, 3):
+            mask = mask.mean(dim=0)
+        elif mask.shape[-1] in (1, 3):
+            mask = mask.mean(dim=-1)
+        else:
+            raise ValueError("attention_mask tensor must be [H,W], [1,H,W], [1,1,H,W], or image-like.")
+    if mask.ndim != 2:
+        raise ValueError("attention_mask tensor must resolve to shape [H, W].")
+    mask = mask.clamp_min(0.0).view(1, 1, int(mask.shape[-2]), int(mask.shape[-1]))
+    if mask.shape[-2:] != (height, width):
+        mask = F.interpolate(mask, size=(height, width), mode="bilinear", align_corners=False)
+    return mask.to(device=device, dtype=torch.float32).contiguous()
+
+
 def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", default=None, help="Optional JSON config file. CLI arguments override config values.")
@@ -42,6 +83,7 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=-1, help="-1 chooses a fresh random seed; otherwise the run is reproducible.")
     parser.add_argument("--shape-bounds", type=float, nargs=4, default=(0.0, 0.0, 1.0, 1.0), metavar=("X0", "Y0", "X1", "Y1"), help="Bounds for triangle centers. Fractions 0..1 or percentages 0..100 are accepted.")
     parser.add_argument("--background-rgb", type=float, nargs=3, default=None, metavar=("R", "G", "B"), help="Optional background color. Accepts 0..1 floats or 0..255 values.")
+    parser.add_argument("--attention-mask", default=None, help="Optional attention mask path (.pt, .npy, or image). Higher values make greedy scoring care more about those pixels.")
     parser.add_argument("--work-size", type=int, default=256, help="Longest side used during greedy placement.")
     parser.add_argument("--device", default="auto", help="Device: auto or cuda. The greedy search core requires CUDA.")
     parser.add_argument("--min-half-base-fraction", type=float, default=1.0 / 256.0)
@@ -83,6 +125,7 @@ def main(argv: List[str] | None = None) -> int:
     _, _, work_height, work_width = target_work.shape
     full_width, full_height = loaded.original_size
     save_image(loaded.working, output_dir / "target_work.png")
+    attention_mask = load_attention_mask(args.attention_mask, height=work_height, width=work_width, device=device)
 
     config = TrianglePlacementConfig(
         num_triangles=int(args.num_triangles),
@@ -98,6 +141,7 @@ def main(argv: List[str] | None = None) -> int:
         size_mutation_fraction=float(args.size_mutation_fraction),
         angle_mutation_degrees=float(args.angle_mutation_degrees),
         background_rgb=args.background_rgb,
+        attention_mask=attention_mask,
     )
     configured_background = normalize_rgb(config.background_rgb)
     if configured_background is None:
@@ -121,8 +165,17 @@ def main(argv: List[str] | None = None) -> int:
             save_image(result.image.cpu(), progress_dir / ("step_%04d.png" % done))
 
     print(
-        "Starting greedy placement: placer=%s triangles=%d candidates=%d mutations=%d work=%dx%d device=%s"
-        % (args.placer, config.num_triangles, config.candidate_count, config.max_shape_mutations, work_width, work_height, device),
+        "Starting greedy placement: placer=%s triangles=%d candidates=%d mutations=%d work=%dx%d device=%s attention=%s"
+        % (
+            args.placer,
+            config.num_triangles,
+            config.candidate_count,
+            config.max_shape_mutations,
+            work_width,
+            work_height,
+            device,
+            "on" if attention_mask is not None else "off",
+        ),
         flush=True,
     )
     result = placer.fit(target=target_work, config=config, initial_image=initial, progress_callback=progress_callback)
@@ -165,6 +218,7 @@ def main(argv: List[str] | None = None) -> int:
         "candidate_count": config.candidate_count,
         "max_shape_mutations": config.max_shape_mutations,
         "shape_bounds": config.shape_bounds.to_list(),
+        "attention_mask": None if args.attention_mask is None else str(args.attention_mask),
         "background_rgb": list(result.background_rgb),
         "work_size": {"width": work_width, "height": work_height},
         "image_size": {"width": full_width, "height": full_height},
