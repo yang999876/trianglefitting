@@ -41,6 +41,51 @@ __device__ __forceinline__ uint32_t mix_seed(uint64_t seed, int candidate, int r
   return y == 0 ? 0x1234567u : y;
 }
 
+__device__ __forceinline__ void isosceles_vertices(
+    const float cx,
+    const float cy,
+    const float half_base,
+    const float tri_height,
+    const float theta,
+    float* x0,
+    float* y0,
+    float* x1,
+    float* y1,
+    float* x2,
+    float* y2) {
+  const float hb = fmaxf(half_base, 1.0e-6f);
+  const float th = fmaxf(tri_height, 1.0e-6f);
+  const float ct = cosf(theta);
+  const float st = sinf(theta);
+  const float apex_y = -th * 0.5f;
+  const float base_y = th * 0.5f;
+  *x0 = cx - st * apex_y;
+  *y0 = cy + ct * apex_y;
+  *x1 = cx + ct * -hb - st * base_y;
+  *y1 = cy + st * -hb + ct * base_y;
+  *x2 = cx + ct * hb - st * base_y;
+  *y2 = cy + st * hb + ct * base_y;
+}
+
+__device__ __forceinline__ bool add_edge_intersection(
+    const float px_y,
+    const float ax,
+    const float ay,
+    const float bx,
+    const float by,
+    float* xs,
+    int* count) {
+  const float min_y = fminf(ay, by);
+  const float max_y = fmaxf(ay, by);
+  if (fabsf(by - ay) < 1.0e-6f || px_y < min_y || px_y >= max_y || *count >= 3) {
+    return false;
+  }
+  const float t = (px_y - ay) / (by - ay);
+  xs[*count] = ax + t * (bx - ax);
+  *count += 1;
+  return true;
+}
+
 __device__ void score_triangle_block(
     const float* __restrict__ target,
     const float* __restrict__ current,
@@ -114,6 +159,135 @@ __device__ void score_triangle_block(
     local_sq_g += tg * tg;
     local_sq_b += tb * tb;
     local_old_sse += er * er + eg * eg + eb * eb;
+  }
+
+  const int base = threadIdx.x * kValues;
+  shared[base + 0] = local_count;
+  shared[base + 1] = local_sum_r;
+  shared[base + 2] = local_sum_g;
+  shared[base + 3] = local_sum_b;
+  shared[base + 4] = local_sq_r;
+  shared[base + 5] = local_sq_g;
+  shared[base + 6] = local_sq_b;
+  shared[base + 7] = local_old_sse;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      const int lhs = threadIdx.x * kValues;
+      const int rhs = (threadIdx.x + stride) * kValues;
+      #pragma unroll
+      for (int i = 0; i < kValues; ++i) {
+        shared[lhs + i] += shared[rhs + i];
+      }
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    const float count = shared[0];
+    *out_count = count;
+    if (count <= 0.0f) {
+      *out_score = __int_as_float(0x7f800000);
+      *out_r = 0.0f;
+      *out_g = 0.0f;
+      *out_b = 0.0f;
+    } else {
+      const float r = fminf(fmaxf(shared[1] / count, 0.0f), 1.0f);
+      const float g = fminf(fmaxf(shared[2] / count, 0.0f), 1.0f);
+      const float b = fminf(fmaxf(shared[3] / count, 0.0f), 1.0f);
+      const float target_sq_sum = shared[4] + shared[5] + shared[6];
+      const float target_dot_color = r * shared[1] + g * shared[2] + b * shared[3];
+      const float color_sq_sum = r * r + g * g + b * b;
+      const float new_sse_inside = target_sq_sum - 2.0f * target_dot_color + color_sq_sum * count;
+      *out_score = current_sse - shared[7] + new_sse_inside;
+      *out_r = r;
+      *out_g = g;
+      *out_b = b;
+    }
+  }
+  __syncthreads();
+}
+
+__device__ void score_triangle_block_scanline(
+    const float* __restrict__ target,
+    const float* __restrict__ current,
+    const float current_sse,
+    const int h,
+    const int w,
+    const float cx,
+    const float cy,
+    const float half_base,
+    const float tri_height,
+    const float theta,
+    float* __restrict__ shared,
+    float* __restrict__ out_score,
+    float* __restrict__ out_r,
+    float* __restrict__ out_g,
+    float* __restrict__ out_b,
+    float* __restrict__ out_count) {
+  float vx0, vy0, vx1, vy1, vx2, vy2;
+  isosceles_vertices(cx, cy, half_base, tri_height, theta, &vx0, &vy0, &vx1, &vy1, &vx2, &vy2);
+
+  const float min_y_f = fminf(vy0, fminf(vy1, vy2));
+  const float max_y_f = fmaxf(vy0, fmaxf(vy1, vy2));
+  const int y_min = max(0, static_cast<int>(ceilf(min_y_f - 0.5f)));
+  const int y_max = min(h - 1, static_cast<int>(floorf(max_y_f - 0.5f)));
+  const int pixels = h * w;
+
+  float local_count = 0.0f;
+  float local_sum_r = 0.0f;
+  float local_sum_g = 0.0f;
+  float local_sum_b = 0.0f;
+  float local_sq_r = 0.0f;
+  float local_sq_g = 0.0f;
+  float local_sq_b = 0.0f;
+  float local_old_sse = 0.0f;
+
+  if (y_min <= y_max) {
+    for (int y = y_min + threadIdx.x; y <= y_max; y += blockDim.x) {
+      const float py = static_cast<float>(y) + 0.5f;
+      float xs[3];
+      int count = 0;
+      add_edge_intersection(py, vx0, vy0, vx1, vy1, xs, &count);
+      add_edge_intersection(py, vx1, vy1, vx2, vy2, xs, &count);
+      add_edge_intersection(py, vx2, vy2, vx0, vy0, xs, &count);
+      if (count < 2) {
+        continue;
+      }
+      float x_left = fminf(xs[0], xs[1]);
+      float x_right = fmaxf(xs[0], xs[1]);
+      if (count == 3) {
+        x_left = fminf(x_left, xs[2]);
+        x_right = fmaxf(x_right, xs[2]);
+      }
+      const int x_min = max(0, static_cast<int>(ceilf(x_left - 0.5f)));
+      const int x_max = min(w - 1, static_cast<int>(floorf(x_right - 0.5f)));
+      for (int x = x_min; x <= x_max; ++x) {
+        const int index = y * w + x;
+        const int offset_r = index;
+        const int offset_g = pixels + index;
+        const int offset_b = pixels * 2 + index;
+        const float tr = target[offset_r];
+        const float tg = target[offset_g];
+        const float tb = target[offset_b];
+        const float cr = current[offset_r];
+        const float cg = current[offset_g];
+        const float cb = current[offset_b];
+        const float er = tr - cr;
+        const float eg = tg - cg;
+        const float eb = tb - cb;
+
+        local_count += 1.0f;
+        local_sum_r += tr;
+        local_sum_g += tg;
+        local_sum_b += tb;
+        local_sq_r += tr * tr;
+        local_sq_g += tg * tg;
+        local_sq_b += tb * tb;
+        local_old_sse += er * er + eg * eg + eb * eb;
+      }
+    }
   }
 
   const int base = threadIdx.x * kValues;
@@ -355,7 +529,7 @@ __global__ void search_triangles_kernel(
   }
   __syncthreads();
 
-  score_triangle_block(
+  score_triangle_block_scanline(
       target,
       current,
       current_sse,
@@ -403,7 +577,7 @@ __global__ void search_triangles_kernel(
     }
     __syncthreads();
 
-    score_triangle_block(
+    score_triangle_block_scanline(
         target,
         current,
         current_sse,
