@@ -13,6 +13,7 @@ from .placer import (
     ShapeBounds,
     TrianglePlacementConfig,
     export_geometrize_json,
+    normalize_rgb,
     render_triangles,
 )
 from ..direct.io import load_image, save_image
@@ -40,6 +41,7 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-shape-mutations", type=int, default=2000, help="Mutation attempts for every candidate each step.")
     parser.add_argument("--seed", type=int, default=-1, help="-1 chooses a fresh random seed; otherwise the run is reproducible.")
     parser.add_argument("--shape-bounds", type=float, nargs=4, default=(0.0, 0.0, 1.0, 1.0), metavar=("X0", "Y0", "X1", "Y1"), help="Bounds for triangle centers. Fractions 0..1 or percentages 0..100 are accepted.")
+    parser.add_argument("--background-rgb", type=float, nargs=3, default=None, metavar=("R", "G", "B"), help="Optional background color. Accepts 0..1 floats or 0..255 values.")
     parser.add_argument("--work-size", type=int, default=256, help="Longest side used during greedy placement.")
     parser.add_argument("--device", default="auto", help="Device: auto or cuda. The greedy search core requires CUDA.")
     parser.add_argument("--min-half-base-fraction", type=float, default=1.0 / 256.0)
@@ -82,10 +84,6 @@ def main(argv: List[str] | None = None) -> int:
     full_width, full_height = loaded.original_size
     save_image(loaded.working, output_dir / "target_work.png")
 
-    background = target_work.mean(dim=(0, 2, 3)).clamp(0.0, 1.0)
-    initial = background.view(1, 3, 1, 1).expand_as(target_work).clone()
-    save_image(initial.cpu(), output_dir / "initial.png")
-
     config = TrianglePlacementConfig(
         num_triangles=int(args.num_triangles),
         candidate_count=int(args.candidate_count),
@@ -99,7 +97,15 @@ def main(argv: List[str] | None = None) -> int:
         center_mutation_fraction=float(args.center_mutation_fraction),
         size_mutation_fraction=float(args.size_mutation_fraction),
         angle_mutation_degrees=float(args.angle_mutation_degrees),
+        background_rgb=args.background_rgb,
     )
+    configured_background = normalize_rgb(config.background_rgb)
+    if configured_background is None:
+        background = target_work.mean(dim=(0, 2, 3)).clamp(0.0, 1.0)
+    else:
+        background = torch.tensor(configured_background, device=device, dtype=torch.float32)
+    initial = background.view(1, 3, 1, 1).expand_as(target_work).clone()
+    save_image(initial.cpu(), output_dir / "initial.png")
 
     placer = HillClimbTrianglePlacer()
 
@@ -159,6 +165,7 @@ def main(argv: List[str] | None = None) -> int:
         "candidate_count": config.candidate_count,
         "max_shape_mutations": config.max_shape_mutations,
         "shape_bounds": config.shape_bounds.to_list(),
+        "background_rgb": list(result.background_rgb),
         "work_size": {"width": work_width, "height": work_height},
         "image_size": {"width": full_width, "height": full_height},
         "initial_sse": result.initial_sse,

@@ -82,6 +82,7 @@ class TrianglePlacementConfig:
     size_mutation_fraction: float = 16.0 / 256.0
     angle_mutation_degrees: float = 16.0
     min_improvement: float = 1e-9
+    background_rgb: Tuple[float, float, float] | None = None
 
     def validate(self) -> None:
         if self.num_triangles < 0:
@@ -96,6 +97,19 @@ class TrianglePlacementConfig:
             raise ValueError("max_half_base_fraction must be >= min_half_base_fraction.")
         if self.max_height_fraction < self.min_height_fraction:
             raise ValueError("max_height_fraction must be >= min_height_fraction.")
+        if self.background_rgb is not None:
+            normalize_rgb(self.background_rgb)
+
+
+def normalize_rgb(values: Sequence[float] | None) -> Tuple[float, float, float] | None:
+    if values is None:
+        return None
+    if len(values) != 3:
+        raise ValueError("background_rgb must contain three values: red green blue.")
+    rgb = [float(value) for value in values]
+    if any(abs(value) > 1.0 for value in rgb):
+        rgb = [value / 255.0 for value in rgb]
+    return tuple(max(0.0, min(1.0, value)) for value in rgb)
 
 
 @dataclass(frozen=True)
@@ -332,7 +346,11 @@ class HillClimbTrianglePlacer:
         seed = resolve_seed(config.seed)
 
         if initial_image is None:
-            background = target.mean(dim=(0, 2, 3)).clamp(0.0, 1.0)
+            configured_background = normalize_rgb(config.background_rgb)
+            if configured_background is None:
+                background = target.mean(dim=(0, 2, 3)).clamp(0.0, 1.0)
+            else:
+                background = torch.tensor(configured_background, device=device, dtype=dtype)
             current = background.view(1, 3, 1, 1).expand_as(target).clone()
         else:
             current = initial_image.detach().to(device=device, dtype=dtype).clone()

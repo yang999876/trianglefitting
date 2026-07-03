@@ -79,6 +79,7 @@ class GreedyPlacerTests(unittest.TestCase):
             candidate_count=32,
             max_shape_mutations=4,
             seed=3,
+            background_rgb=(255.0, 255.0, 255.0),
             max_half_base_fraction=0.40,
             max_height_fraction=0.60,
         )
@@ -89,6 +90,7 @@ class GreedyPlacerTests(unittest.TestCase):
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         self.assertEqual(payload["shapes"][0]["type"], 1)
+        self.assertEqual(payload["shapes"][0]["color"], [255, 255, 255, 255])
         self.assertEqual(payload["shapes"][1]["type"], 512)
         self.assertEqual(payload["shapes"][1]["color"][3], 255)
         self.assertEqual(len(payload["shapes"][1]["data"]), 5)
@@ -104,6 +106,7 @@ class GreedyPlacerTests(unittest.TestCase):
                         "device": "cpu",
                         "num_triangles": 12,
                         "candidate_count": 64,
+                        "background_rgb": [255, 255, 255],
                         "shape_bounds": [0.1, 0.2, 0.8, 0.9],
                     }
                 ),
@@ -115,6 +118,7 @@ class GreedyPlacerTests(unittest.TestCase):
         self.assertEqual(args.device, "cpu")
         self.assertEqual(args.num_triangles, 5)
         self.assertEqual(args.candidate_count, 64)
+        self.assertEqual(args.background_rgb, [255, 255, 255])
         self.assertEqual(args.shape_bounds, [0.1, 0.2, 0.8, 0.9])
 
 

@@ -15,6 +15,7 @@ The default config uses:
 - `max_shape_mutations = 2000`
 - fixed alpha `255`
 - one primitive type: opaque isosceles triangles
+- optional `background_rgb`, where `null` uses the target average color and `[255, 255, 255]` style values force a fixed background
 - CUDA is required for the greedy search core; Torch is only used as tensor/IO glue around the extension.
 
 The main output is `greedy_geometrize.json`, which can be passed to the diffvg refinement backend:
