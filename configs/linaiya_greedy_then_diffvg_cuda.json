@@ -1,0 +1,43 @@
+{
+  "input": "assets/linaiya.png",
+  "output": "out/linaiya_greedy_then_diffvg",
+  "greedy": {
+    "placer": "hill_climb",
+    "work_size": 512,
+    "device": "cuda",
+    "num_triangles": 300,
+    "candidate_count": 1024,
+    "max_shape_mutations": 512,
+    "background_rgb": null,
+    "seed": -1,
+    "shape_bounds": [0.0, 0.0, 1.0, 1.0],
+    "min_half_base_fraction": 0.00390625,
+    "max_half_base_fraction": 0.125,
+    "min_height_fraction": 0.00390625,
+    "max_height_fraction": 0.25,
+    "center_mutation_fraction": 0.125,
+    "size_mutation_fraction": 0.0625,
+    "angle_mutation_degrees": 16.0,
+    "metrics_every": 10,
+    "progress_every": 25
+  },
+  "diffvg": {
+    "steps": 300,
+    "work_size": 512,
+    "seed": 1234,
+    "device": "cuda",
+    "geometry_lr": 0.02,
+    "color_lr": 0.01,
+    "samples": 2,
+    "metrics_every": 25,
+    "progress_every": 100,
+    "max_triangles": null,
+    "grad_clip": 5.0,
+    "rebirth_count": 10,
+    "rebirth_every": 100,
+    "rebirth_initial": true,
+    "rebirth_candidate_count": 64,
+    "rebirth_max_shape_mutations": 512,
+    "rebirth_bounds_fraction": 0.2
+  }
+}
