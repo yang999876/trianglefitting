@@ -8,10 +8,10 @@ from pathlib import Path
 import torch
 
 from trianglefit.greedy_prior.place import parse_args
+from trianglefit.greedy_prior import cuda_scoring
 from trianglefit.greedy_prior.placer import (
     HillClimbTrianglePlacer,
     ShapeBounds,
-    TriangleBatch,
     TrianglePlacementConfig,
     export_geometrize_json,
 )
@@ -28,36 +28,17 @@ def _synthetic_target(size: int = 32) -> torch.Tensor:
 
 
 class GreedyPlacerTests(unittest.TestCase):
-    def test_all_candidates_enter_hill_climb(self) -> None:
-        class RecordingPlacer(HillClimbTrianglePlacer):
-            def __init__(self) -> None:
-                self.mutation_batch_sizes = []
-
-            def _mutate(self, batch: TriangleBatch, width: int, height: int, config: TrianglePlacementConfig, generator: torch.Generator) -> TriangleBatch:
-                self.mutation_batch_sizes.append(batch.count)
-                return super()._mutate(batch, width=width, height=height, config=config, generator=generator)
-
-        target = _synthetic_target()
-        placer = RecordingPlacer()
-        config = TrianglePlacementConfig(
-            num_triangles=1,
-            candidate_count=23,
-            max_shape_mutations=3,
-            candidate_chunk_size=8,
-            seed=13,
-            max_half_base_fraction=0.40,
-            max_height_fraction=0.60,
-        )
-        placer.fit(target=target, config=config)
-        self.assertEqual(placer.mutation_batch_sizes, [23, 23, 23])
+    def _require_cuda(self) -> None:
+        if not cuda_scoring.is_available():
+            self.skipTest("CUDA greedy extension is not available.")
 
     def test_hill_climb_places_triangle_and_reduces_loss(self) -> None:
-        target = _synthetic_target()
+        self._require_cuda()
+        target = _synthetic_target().cuda()
         config = TrianglePlacementConfig(
             num_triangles=2,
             candidate_count=96,
             max_shape_mutations=24,
-            candidate_chunk_size=24,
             seed=11,
             max_half_base_fraction=0.45,
             max_height_fraction=0.70,
@@ -70,13 +51,13 @@ class GreedyPlacerTests(unittest.TestCase):
             self.assertLessEqual(max(triangle.rgb), 1.0)
 
     def test_shape_bounds_constrain_triangle_centers(self) -> None:
-        target = _synthetic_target()
+        self._require_cuda()
+        target = _synthetic_target().cuda()
         bounds = ShapeBounds.from_values((0.4, 0.4, 0.6, 0.6))
         config = TrianglePlacementConfig(
             num_triangles=1,
             candidate_count=64,
             max_shape_mutations=8,
-            candidate_chunk_size=16,
             seed=7,
             shape_bounds=bounds,
             max_half_base_fraction=0.30,
@@ -91,12 +72,12 @@ class GreedyPlacerTests(unittest.TestCase):
         self.assertLessEqual(triangle.cy / result.height, bounds.y_max)
 
     def test_export_uses_opaque_isosceles_triangle_schema(self) -> None:
-        target = _synthetic_target()
+        self._require_cuda()
+        target = _synthetic_target().cuda()
         config = TrianglePlacementConfig(
             num_triangles=1,
             candidate_count=32,
             max_shape_mutations=4,
-            candidate_chunk_size=16,
             seed=3,
             max_half_base_fraction=0.40,
             max_height_fraction=0.60,

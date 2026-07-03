@@ -50,6 +50,18 @@ class ShapeBounds:
         max_xy = torch.tensor([max(x0 + 0.5, x1 - 0.5), max(y0 + 0.5, y1 - 0.5)], device=device, dtype=dtype)
         return min_xy, max_xy
 
+    def center_limits_px_values(self, width: int, height: int) -> Tuple[float, float, float, float]:
+        x0 = self.x_min * float(width)
+        y0 = self.y_min * float(height)
+        x1 = self.x_max * float(width)
+        y1 = self.y_max * float(height)
+        return (
+            x0 + 0.5,
+            y0 + 0.5,
+            max(x0 + 0.5, x1 - 0.5),
+            max(y0 + 0.5, y1 - 0.5),
+        )
+
     def to_list(self) -> List[float]:
         return [self.x_min, self.y_min, self.x_max, self.y_max]
 
@@ -315,8 +327,9 @@ class HillClimbTrianglePlacer:
         device = target.device
         dtype = target.dtype
         _, _, height, width = target.shape
-        generator = make_generator(device, config.seed)
-        seed = int(generator.initial_seed())
+        if device.type != "cuda":
+            raise ValueError("HillClimbTrianglePlacer now requires a CUDA target. Use --device cuda or --device auto on a CUDA machine.")
+        seed = resolve_seed(config.seed)
 
         if initial_image is None:
             background = target.mean(dim=(0, 2, 3)).clamp(0.0, 1.0)
@@ -328,45 +341,65 @@ class HillClimbTrianglePlacer:
             background = current[:, :, 0, 0].view(3).clamp(0.0, 1.0)
 
         background_rgb = tuple(float(value) for value in background.detach().cpu())
-        grid_x, grid_y = _pixel_grid(height=height, width=width, device=device, dtype=dtype)
         target_chw = target[0]
-        target_sq_chw = target_chw.square()
+        current_chw = current[0].contiguous()
         triangles: List[PlacedTriangle] = []
         history: List[dict] = []
-        current_sse = _image_sse(target, current)
-        initial_sse = float(current_sse.detach().cpu().item())
+        current_sse = float(_image_sse(target, current).detach().cpu().item())
+        initial_sse = current_sse
+
+        bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y = config.shape_bounds.center_limits_px_values(width=width, height=height)
+        min_half_base = max(config.min_half_base_fraction * float(width), 1e-3)
+        max_half_base = max(min_half_base, config.max_half_base_fraction * float(width))
+        min_height = max(config.min_height_fraction * float(height), 1e-3)
+        max_height = max(min_height, config.max_height_fraction * float(height))
+        center_step_x = config.center_mutation_fraction * float(width)
+        center_step_y = config.center_mutation_fraction * float(height)
+        half_base_step = config.size_mutation_fraction * float(width)
+        height_step = config.size_mutation_fraction * float(height)
+        angle_step = math.radians(config.angle_mutation_degrees)
 
         for index in range(config.num_triangles):
-            candidate, color, score = self._search_one_triangle(
+            params, color, score_tensor = cuda_scoring.search_and_apply(
                 target_chw=target_chw,
-                target_sq_chw=target_sq_chw,
-                current=current[0],
+                current_chw=current_chw,
                 current_sse=current_sse,
-                grid_x=grid_x,
-                grid_y=grid_y,
-                width=width,
-                height=height,
-                config=config,
-                generator=generator,
+                candidate_count=config.candidate_count,
+                mutation_count=config.max_shape_mutations,
+                bounds_min_x=bounds_min_x,
+                bounds_min_y=bounds_min_y,
+                bounds_max_x=bounds_max_x,
+                bounds_max_y=bounds_max_y,
+                min_half_base=min_half_base,
+                max_half_base=max_half_base,
+                min_height=min_height,
+                max_height=max_height,
+                center_step_x=center_step_x,
+                center_step_y=center_step_y,
+                half_base_step=half_base_step,
+                height_step=height_step,
+                angle_step=angle_step,
+                seed=seed,
+                round_index=index,
             )
+            score = float(score_tensor.detach().cpu().item())
             improvement = current_sse - score
-            if not torch.isfinite(score) or float(improvement.detach().cpu().item()) <= config.min_improvement:
+            if not math.isfinite(score) or improvement <= config.min_improvement:
                 break
 
-            mask = _triangle_masks_px(candidate, grid_x=grid_x, grid_y=grid_y).view(1, 1, height, width)
-            color_image = color.view(1, 3, 1, 1)
-            current = (current * (1.0 - mask) + color_image * mask).clamp(0.0, 1.0)
             previous_sse = current_sse
-            current_sse = score.detach()
+            current_sse = score
+            params_cpu = params.detach().cpu()
+            color_cpu = color.detach().cpu().view(3)
             triangle = PlacedTriangle(
-                cx=float(candidate.centers[0, 0].detach().cpu().item()),
-                cy=float(candidate.centers[0, 1].detach().cpu().item()),
-                half_base=float(candidate.half_base[0, 0].detach().cpu().item()),
-                height=float(candidate.height[0, 0].detach().cpu().item()),
-                theta=float(candidate.theta[0, 0].detach().cpu().item()),
-                rgb=tuple(float(value) for value in color.detach().cpu().view(3)),
-                score_sse=float(current_sse.detach().cpu().item()),
-                improvement_sse=float((previous_sse - current_sse).detach().cpu().item()),
+                cx=float(params_cpu[0].item()),
+                cy=float(params_cpu[1].item()),
+                half_base=float(params_cpu[2].item()),
+                height=float(params_cpu[3].item()),
+                theta=float(params_cpu[4].item()),
+                rgb=tuple(float(value) for value in color_cpu),
+                score_sse=current_sse,
+                improvement_sse=previous_sse - current_sse,
             )
             triangles.append(triangle)
             history.append(
@@ -392,15 +425,15 @@ class HillClimbTrianglePlacer:
                     history=list(history),
                     seed=seed,
                     initial_sse=initial_sse,
-                    final_sse=float(current_sse.detach().cpu().item()),
+                    final_sse=current_sse,
                     width=width,
                     height=height,
                 )
                 progress_callback(index + 1, config.num_triangles, partial)
 
-        final_sse = float(current_sse.detach().cpu().item())
+        final_sse = current_sse
         return GreedyPlacementResult(
-            image=current.detach(),
+            image=current_chw.view(1, 3, height, width).detach(),
             background_rgb=background_rgb,
             triangles=triangles,
             history=history,

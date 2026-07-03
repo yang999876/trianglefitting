@@ -142,3 +142,53 @@ def score_triangles(
         score_value,
     )
     return scores, colors, counts
+
+
+def search_and_apply(
+    target_chw: torch.Tensor,
+    current_chw: torch.Tensor,
+    current_sse: float,
+    candidate_count: int,
+    mutation_count: int,
+    bounds_min_x: float,
+    bounds_min_y: float,
+    bounds_max_x: float,
+    bounds_max_y: float,
+    min_half_base: float,
+    max_half_base: float,
+    min_height: float,
+    max_height: float,
+    center_step_x: float,
+    center_step_y: float,
+    half_base_step: float,
+    height_step: float,
+    angle_step: float,
+    seed: int,
+    round_index: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not target_chw.is_cuda:
+        raise ValueError("CUDA greedy search requires CUDA tensors.")
+    extension = _load_extension()
+    best_params, best_color, best_score = extension.search_and_apply(
+        target_chw.contiguous(),
+        current_chw.contiguous(),
+        float(current_sse),
+        int(candidate_count),
+        int(mutation_count),
+        float(bounds_min_x),
+        float(bounds_min_y),
+        float(bounds_max_x),
+        float(bounds_max_y),
+        float(min_half_base),
+        float(max_half_base),
+        float(min_height),
+        float(max_height),
+        float(center_step_x),
+        float(center_step_y),
+        float(half_base_step),
+        float(height_step),
+        float(angle_step),
+        int(seed),
+        int(round_index),
+    )
+    return best_params, best_color, best_score

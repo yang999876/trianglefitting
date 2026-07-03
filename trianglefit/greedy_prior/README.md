@@ -2,7 +2,7 @@
 
 This package generates a Geometrize-style greedy initialization for later optimization backends.
 
-It is not a differentiable optimization backend. Each round samples opaque isosceles triangle candidates, hill-climbs all candidates in parallel, adds the best candidate to the current image, and exports a Geometrize-compatible JSON warm start.
+It is not a differentiable optimization backend. Each round samples opaque isosceles triangle candidates, hill-climbs all candidates in parallel in a fused CUDA kernel, adds the best candidate to the current image on GPU, and exports a Geometrize-compatible JSON warm start.
 
 ```bash
 python -m trianglefit.greedy_prior.place --config configs/greedy_place_256_cuda.json
@@ -15,6 +15,7 @@ The default config uses:
 - `max_shape_mutations = 2000`
 - fixed alpha `255`
 - one primitive type: opaque isosceles triangles
+- CUDA is required for the greedy search core; Torch is only used as tensor/IO glue around the extension.
 
 The main output is `greedy_geometrize.json`, which can be passed to the diffvg refinement backend:
 

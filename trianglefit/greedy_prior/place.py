@@ -38,11 +38,10 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-triangles", type=int, default=300, help="Maximum number of accepted triangles.")
     parser.add_argument("--candidate-count", type=int, default=2048, help="Random candidates hill-climbed in parallel each step.")
     parser.add_argument("--max-shape-mutations", type=int, default=2000, help="Mutation attempts for every candidate each step.")
-    parser.add_argument("--candidate-chunk-size", type=int, default=256, help="Candidate batch size used during scoring.")
     parser.add_argument("--seed", type=int, default=-1, help="-1 chooses a fresh random seed; otherwise the run is reproducible.")
     parser.add_argument("--shape-bounds", type=float, nargs=4, default=(0.0, 0.0, 1.0, 1.0), metavar=("X0", "Y0", "X1", "Y1"), help="Bounds for triangle centers. Fractions 0..1 or percentages 0..100 are accepted.")
     parser.add_argument("--work-size", type=int, default=256, help="Longest side used during greedy placement.")
-    parser.add_argument("--device", default="auto", help="Torch device: auto, cpu, cuda, cuda:0, etc.")
+    parser.add_argument("--device", default="auto", help="Device: auto or cuda. The greedy search core requires CUDA.")
     parser.add_argument("--min-half-base-fraction", type=float, default=1.0 / 256.0)
     parser.add_argument("--max-half-base-fraction", type=float, default=32.0 / 256.0)
     parser.add_argument("--min-height-fraction", type=float, default=1.0 / 256.0)
@@ -91,7 +90,6 @@ def main(argv: List[str] | None = None) -> int:
         num_triangles=int(args.num_triangles),
         candidate_count=int(args.candidate_count),
         max_shape_mutations=int(args.max_shape_mutations),
-        candidate_chunk_size=int(args.candidate_chunk_size),
         seed=int(args.seed),
         shape_bounds=ShapeBounds.from_values(args.shape_bounds),
         min_half_base_fraction=float(args.min_half_base_fraction),
@@ -160,7 +158,6 @@ def main(argv: List[str] | None = None) -> int:
         "requested_triangle_count": config.num_triangles,
         "candidate_count": config.candidate_count,
         "max_shape_mutations": config.max_shape_mutations,
-        "candidate_chunk_size": config.candidate_chunk_size,
         "shape_bounds": config.shape_bounds.to_list(),
         "work_size": {"width": work_width, "height": work_height},
         "image_size": {"width": full_width, "height": full_height},

@@ -7,7 +7,6 @@
   "num_triangles": 300,
   "candidate_count": 1024,
   "max_shape_mutations": 512,
-  "candidate_chunk_size": 2048,
   "seed": -1,
   "shape_bounds": [0.0, 0.0, 1.0, 1.0],
   "min_half_base_fraction": 0.00390625,
