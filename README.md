@@ -59,6 +59,14 @@ Transformer fit:
 python -m trianglefit.transformer.fit --input assets/linaiya.png --output out/transformer --num-triangles 300 --steps 3000 --device cuda
 ```
 
+Mainline attention + greedy + diffvg pipeline:
+
+```powershell
+python -m trianglefit.pipeline.greedy_then_diffvg --config configs/zhongli_attention_greedy_diffvg_cuda.json
+```
+
+This pipeline first generates a MediaPipe face attention mask. If no face is detected and `attention.require_face` is true, it stops before greedy placement.
+
 ## Layout
 
 - `trianglefit/direct`: direct triangle parameter fitting and rerender tools

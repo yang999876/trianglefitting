@@ -9,3 +9,5 @@ cssutils>=2.0
 scikit-image>=0.25
 matplotlib>=3.10
 pybind11>=3.0
+mediapipe>=0.10
+opencv-python>=4.8
