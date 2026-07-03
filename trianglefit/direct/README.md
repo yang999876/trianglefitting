@@ -59,6 +59,20 @@ To run the same warm start through diffvg's renderer/backward:
 python -m trianglefit.direct.fit_diffvg_backend --input assets/linaiya.png --init-json assets/linaiya.json --output out/diffvg_backend --steps 200 --work-size 256 --device cpu --samples 1
 ```
 
+To create a Geometrize-style greedy warm start directly in torch:
+
+```bash
+python -m trianglefit.greedy_prior.place --config configs/greedy_place_256_cuda.json
+```
+
+This writes `greedy_geometrize.json`, which can be passed to `fit_diffvg_backend --init-json` for the later diffvg refinement stage. The greedy placer uses opaque isosceles triangles, fixed alpha `255`, `candidate-count=2048`, `max-shape-mutations=2000`, and `num-triangles=300` by default. Unlike upstream Geometrize, all candidates are hill-climbed in parallel before the best one is added.
+
+You can temporarily override config values from the command line:
+
+```bash
+python -m trianglefit.greedy_prior.place --config configs/greedy_place_256_cuda.json --seed 1234 --output out/greedy_seed_1234
+```
+
 Or use a config file:
 
 ```bash

@@ -1,0 +1,22 @@
+{
+  "input": "assets/cat.png",
+  "output": "out/greed_cat_v4",
+  "placer": "hill_climb",
+  "work_size": 512,
+  "device": "cuda",
+  "num_triangles": 300,
+  "candidate_count": 1024,
+  "max_shape_mutations": 512,
+  "candidate_chunk_size": 2048,
+  "seed": -1,
+  "shape_bounds": [0.0, 0.0, 1.0, 1.0],
+  "min_half_base_fraction": 0.00390625,
+  "max_half_base_fraction": 0.125,
+  "min_height_fraction": 0.00390625,
+  "max_height_fraction": 0.25,
+  "center_mutation_fraction": 0.125,
+  "size_mutation_fraction": 0.0625,
+  "angle_mutation_degrees": 16.0,
+  "metrics_every": 10,
+  "progress_every": 25
+}
