@@ -154,6 +154,51 @@ def _image_l1_tensor(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
     return torch.mean(torch.abs(first - second))
 
 
+def _weighted_l1_tensor(first: torch.Tensor, second: torch.Tensor, attention_hw: torch.Tensor | None = None) -> torch.Tensor:
+    error = torch.abs(first - second)
+    if attention_hw is None:
+        return torch.mean(error)
+    weight = attention_hw.to(device=first.device, dtype=first.dtype).view(1, 1, *attention_hw.shape)
+    return torch.sum(error * weight) / (torch.sum(weight).clamp_min(1.0e-6) * float(first.shape[1]))
+
+
+def _load_attention_mask(path: str | None, height: int, width: int, device: torch.device) -> torch.Tensor | None:
+    if path is None:
+        return None
+    mask_path = Path(path)
+    if mask_path.suffix.lower() == ".pt":
+        mask = torch.load(mask_path, map_location="cpu", weights_only=False)
+        if not isinstance(mask, torch.Tensor):
+            raise ValueError("rebirth_attention_mask .pt file must contain a torch.Tensor.")
+    elif mask_path.suffix.lower() == ".npy":
+        mask = torch.from_numpy(np.load(mask_path))
+    else:
+        from PIL import Image
+
+        image = Image.open(mask_path).convert("F")
+        mask = torch.from_numpy(np.asarray(image, dtype=np.float32))
+        if float(mask.max().item()) > 1.0:
+            mask = mask / 255.0
+        mask = 1.0 + mask
+
+    mask = mask.to(dtype=torch.float32)
+    while mask.ndim > 2 and mask.shape[0] == 1:
+        mask = mask[0]
+    if mask.ndim == 3:
+        if mask.shape[0] in (1, 3):
+            mask = mask.mean(dim=0)
+        elif mask.shape[-1] in (1, 3):
+            mask = mask.mean(dim=-1)
+        else:
+            raise ValueError("rebirth_attention_mask tensor must be [H,W], [1,H,W], [1,1,H,W], or image-like.")
+    if mask.ndim != 2:
+        raise ValueError("rebirth_attention_mask tensor must resolve to shape [H, W].")
+    mask = mask.clamp_min(0.0).view(1, 1, int(mask.shape[-2]), int(mask.shape[-1]))
+    if mask.shape[-2:] != (height, width):
+        mask = F.interpolate(mask, size=(height, width), mode="bilinear", align_corners=False)
+    return mask[0, 0].to(device=device, dtype=torch.float32).contiguous()
+
+
 @torch.no_grad()
 def _lowest_contribution_indices(
     table: PixelTriangleTable,
@@ -161,17 +206,18 @@ def _lowest_contribution_indices(
     width: int,
     height: int,
     count: int,
+    attention_hw: torch.Tensor | None = None,
 ) -> Tuple[List[int], torch.Tensor, List[float]]:
     count = min(max(0, int(count)), table.count)
     if count == 0:
         return [], _render_hard_isosceles(table, width=width, height=height), []
 
     current = _render_hard_isosceles(table, width=width, height=height)
-    base_l1 = _image_l1_tensor(current, target)
+    base_l1 = _weighted_l1_tensor(current, target, attention_hw)
     contributions: List[float] = []
     for index in range(table.count):
         without = _render_hard_isosceles(table, width=width, height=height, exclude_indices={index})
-        removed_l1 = _image_l1_tensor(without, target)
+        removed_l1 = _weighted_l1_tensor(without, target, attention_hw)
         contributions.append(float((removed_l1 - base_l1).detach().cpu().item()))
 
     ranked = sorted(range(table.count), key=lambda item: contributions[item])
@@ -186,9 +232,13 @@ def _sample_residual_bounds(
     current: torch.Tensor,
     bounds_fraction: float,
     generator: torch.Generator,
+    attention_hw: torch.Tensor | None = None,
 ) -> ShapeBounds:
     _, _, height, width = target.shape
-    residual = torch.mean(torch.abs(target - current), dim=1).view(-1)
+    residual_map = torch.mean(torch.abs(target - current), dim=1)[0]
+    if attention_hw is not None:
+        residual_map = residual_map * attention_hw.to(device=target.device, dtype=target.dtype)
+    residual = residual_map.view(-1)
     if float(residual.sum().detach().cpu().item()) <= 1e-12:
         flat_index = torch.randint(0, residual.numel(), (1,), device=target.device, generator=generator)
     else:
@@ -229,6 +279,7 @@ def _rebirth_low_contribution_triangles(
     bounds_fraction: float,
     seed: int,
     round_index: int,
+    attention_hw: torch.Tensor | None = None,
 ) -> dict:
     selected, current, contributions = _lowest_contribution_indices(
         table=table,
@@ -236,11 +287,13 @@ def _rebirth_low_contribution_triangles(
         width=width,
         height=height,
         count=count,
+        attention_hw=attention_hw,
     )
     if not selected:
-        return {"indices": [], "before_l1": _l1(current, target), "after_l1": _l1(current, target)}
+        score = float(_weighted_l1_tensor(current, target, attention_hw).detach().cpu().item())
+        return {"indices": [], "before_l1": score, "after_l1": score}
 
-    before_l1 = _l1(current, target)
+    before_l1 = float(_weighted_l1_tensor(current, target, attention_hw).detach().cpu().item())
     generator = torch.Generator(device=target.device)
     generator.manual_seed(int(seed) + 1_000_003 + int(round_index) * 65_537)
     placer = HillClimbTrianglePlacer()
@@ -251,6 +304,7 @@ def _rebirth_low_contribution_triangles(
             current=current,
             bounds_fraction=bounds_fraction,
             generator=generator,
+            attention_hw=attention_hw,
         )
         config = TrianglePlacementConfig(
             num_triangles=1,
@@ -260,6 +314,7 @@ def _rebirth_low_contribution_triangles(
             seed=int(seed) + int(round_index) * 10_000 + offset,
             shape_bounds=bounds,
             background_rgb=tuple(float(value) for value in table.background_rgb.detach().cpu().view(3)),
+            attention_mask=None if attention_hw is None else attention_hw.view(1, 1, height, width),
         )
         result = placer.fit(target=target, config=config, initial_image=current)
         if not result.triangles:
@@ -271,12 +326,13 @@ def _rebirth_low_contribution_triangles(
             {
                 "index": int(slot_index),
                 "old_contribution_l1": float(contributions[slot_index]),
+                "attention": attention_hw is not None,
                 "bounds": bounds.to_list(),
                 "improvement_sse": float(triangle.improvement_sse),
             }
         )
 
-    after_l1 = _l1(current, target)
+    after_l1 = float(_weighted_l1_tensor(current, target, attention_hw).detach().cpu().item())
     return {
         "indices": [int(index) for index in selected],
         "before_l1": before_l1,
@@ -340,6 +396,7 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rebirth-candidate-count", type=int, default=256, help="CUDA greedy candidates used for each reborn triangle.")
     parser.add_argument("--rebirth-max-shape-mutations", type=int, default=512, help="CUDA greedy hill-climb mutations used for each reborn triangle.")
     parser.add_argument("--rebirth-bounds-fraction", type=float, default=0.2, help="Local search box side length as a fraction of image size around a residual-sampled point.")
+    parser.add_argument("--rebirth-attention-mask", default=None, help="Optional attention mask used only for rebirth deletion, residual sampling, and reborn greedy scoring.")
 
     if config_args.config is not None:
         with Path(config_args.config).open("r", encoding="utf-8") as handle:
@@ -377,6 +434,7 @@ def main(argv: List[str] | None = None) -> int:
     target_work = loaded.working.to(device=device, dtype=torch.float32)
     _, _, work_height, work_width = target_work.shape
     save_image(loaded.working, output_dir / "target_work.png")
+    rebirth_attention_hw = _load_attention_mask(args.rebirth_attention_mask, height=work_height, width=work_width, device=device)
 
     payload = _trim_payload(_read_geometrize_json(Path(args.init_json)), args.max_triangles)
     table = _table_from_payload(payload, work_width=work_width, work_height=work_height, device=device)
@@ -394,13 +452,14 @@ def main(argv: List[str] | None = None) -> int:
             bounds_fraction=float(args.rebirth_bounds_fraction),
             seed=seed,
             round_index=0,
+            attention_hw=rebirth_attention_hw,
         )
         event["step"] = 0
         event["kind"] = "initial"
         rebirth_history.append(event)
         print(
-            "[rebirth initial] replaced=%d l1 %.6f -> %.6f"
-            % (len(event.get("reborn", [])), float(event["before_l1"]), float(event["after_l1"])),
+            "[rebirth initial] replaced=%d attention=%s l1 %.6f -> %.6f"
+            % (len(event.get("reborn", [])), "on" if rebirth_attention_hw is not None else "off", float(event["before_l1"]), float(event["after_l1"])),
             flush=True,
         )
 
@@ -441,14 +500,15 @@ def main(argv: List[str] | None = None) -> int:
                 bounds_fraction=float(args.rebirth_bounds_fraction),
                 seed=seed,
                 round_index=step,
+                attention_hw=rebirth_attention_hw,
             )
             event["step"] = step
             event["kind"] = "periodic"
             rebirth_history.append(event)
             optimizer = torch.optim.Adam(table.optimizer_groups(geometry_lr=args.geometry_lr, color_lr=args.color_lr))
             print(
-                "[rebirth step %d] replaced=%d l1 %.6f -> %.6f"
-                % (step, len(event.get("reborn", [])), float(event["before_l1"]), float(event["after_l1"])),
+                "[rebirth step %d] replaced=%d attention=%s l1 %.6f -> %.6f"
+                % (step, len(event.get("reborn", [])), "on" if rebirth_attention_hw is not None else "off", float(event["before_l1"]), float(event["after_l1"])),
                 flush=True,
             )
 
@@ -530,6 +590,7 @@ def main(argv: List[str] | None = None) -> int:
                 "candidate_count": int(args.rebirth_candidate_count),
                 "max_shape_mutations": int(args.rebirth_max_shape_mutations),
                 "bounds_fraction": float(args.rebirth_bounds_fraction),
+                "attention_mask": None if args.rebirth_attention_mask is None else str(args.rebirth_attention_mask),
                 "history": rebirth_history,
             },
             "history": history,
