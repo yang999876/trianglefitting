@@ -1,0 +1,16 @@
+{
+  "input": "assets/zhongli_030.png",
+  "init_json": "out/zhongli_v1/greedy_geometrize.json",
+  "output": "out/zhongli_diffvg_isosceles_refine",
+  "steps": 200,
+  "work_size": 512,
+  "seed": 1234,
+  "device": "cuda",
+  "geometry_lr": 0.02,
+  "color_lr": 0.01,
+  "samples": 2,
+  "metrics_every": 25,
+  "progress_every": 100,
+  "max_triangles": null,
+  "grad_clip": 5.0
+}

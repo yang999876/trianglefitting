@@ -59,6 +59,12 @@ To run the same warm start through diffvg's renderer/backward:
 python -m trianglefit.direct.fit_diffvg_backend --input assets/linaiya.png --init-json assets/linaiya.json --output out/diffvg_backend --steps 200 --work-size 256 --device cpu --samples 1
 ```
 
+To refine a greedy isosceles-triangle warm start with diffvg while preserving the isosceles parameterization:
+
+```bash
+python -m trianglefit.direct.fit_diffvg_isosceles_backend --config configs/diffvg_isosceles_512_cuda.json
+```
+
 To create a Geometrize-style greedy warm start with the CUDA hill-climb prior:
 
 ```bash
