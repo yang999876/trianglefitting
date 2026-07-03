@@ -2,7 +2,7 @@
   "input": "assets/zhongli_030.png",
   "init_json": "out/zhongli_v1/greedy_geometrize.json",
   "output": "out/zhongli_diffvg_isosceles_refine",
-  "steps": 200,
+  "steps": 300,
   "work_size": 512,
   "seed": 1234,
   "device": "cuda",

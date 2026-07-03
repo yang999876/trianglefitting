@@ -17,6 +17,21 @@ from .io import load_image, save_image
 from .utils import ensure_dir, serialize_json
 
 
+def _gaussian_blur(image: torch.Tensor, sigma: float) -> torch.Tensor:
+    if sigma <= 0.0:
+        return image
+    kernel_size = 2 * int(math.ceil(3.0 * sigma)) + 1
+    coords = torch.arange(kernel_size, device=image.device, dtype=image.dtype) - (kernel_size // 2)
+    kernel_1d = torch.exp(-(coords ** 2) / (2.0 * sigma * sigma))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    channels = image.shape[1]
+    weight = kernel_2d.view(1, 1, kernel_size, kernel_size).expand(channels, 1, -1, -1)
+    padding = kernel_size // 2
+    padded = F.pad(image, (padding, padding, padding, padding), mode="reflect")
+    return F.conv2d(padded, weight, groups=channels)
+
+
 def _import_diffvg():
     try:
         import pydiffvg  # type: ignore
@@ -351,6 +366,10 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--jitter-std", type=float, default=0.03, help="Geometry jitter std as a fraction of the short side for jitter/partial_random init.")
     parser.add_argument("--jitter-color-std", type=float, default=0.03, help="Color jitter std in normalized RGBA units for jitter/partial_random init.")
     parser.add_argument("--reinit-fraction", type=float, default=0.25, help="Fraction of triangles to randomize for partial_random init.")
+    parser.add_argument("--blur-sigma-start", type=float, default=0.0, help="Initial Gaussian blur sigma for coarse-to-fine annealing. 0 disables blur.")
+    parser.add_argument("--blur-sigma-end", type=float, default=0.0, help="Final Gaussian blur sigma. Linearly interpolated from start to end over training.")
+    parser.add_argument("--lpips-weight", type=float, default=0.0, help="Weight for LPIPS perceptual loss. 0 disables. Loss = (1-w)*L1 + w*LPIPS.")
+    parser.add_argument("--lpips-cadence", type=int, default=1, help="Compute LPIPS every N steps (expensive). L1-only on other steps.")
     if config_args.config is not None:
         with Path(config_args.config).open("r", encoding="utf-8") as handle:
             raw_config = json.load(handle)
@@ -439,6 +458,21 @@ def main(argv: List[str] | None = None) -> int:
     points_optimizer = torch.optim.Adam(point_vars, lr=args.geometry_lr)
     color_optimizer = torch.optim.Adam(color_vars, lr=args.color_lr)
 
+    lpips_model = None
+    if args.lpips_weight > 0.0:
+        try:
+            import lpips as _lpips_lib
+            lpips_model = _lpips_lib.LPIPS(net="vgg").eval().to(device)
+            for p in lpips_model.parameters():
+                p.requires_grad = False
+            print("LPIPS (vgg) loaded, weight=%.2f cadence=%d" % (args.lpips_weight, args.lpips_cadence), flush=True)
+        except ImportError:
+            from .losses import VGGFeatureDistance
+            lpips_model = VGGFeatureDistance().eval().to(device)
+            for p in lpips_model.parameters():
+                p.requires_grad = False
+            print("LPIPS not installed, using VGGFeatureDistance fallback, weight=%.2f" % args.lpips_weight, flush=True)
+
     with torch.no_grad():
         initial = _render_diffvg(pydiffvg, shapes, shape_groups, work_width, work_height, background_rgb, seed=seed, samples=args.samples)
     save_image(initial.cpu(), output_dir / "initial.png")
@@ -450,18 +484,30 @@ def main(argv: List[str] | None = None) -> int:
     history = [{"step": 0, "l1": initial_l1, "rmse": initial_rmse}]
 
     print(
-        "Starting diffvg backend fit: triangles=%d work_size=%dx%d device=%s initial_l1=%.6f initial_rmse=%.6f"
-        % (len(shapes), work_width, work_height, device, initial_l1, initial_rmse),
+        "Starting diffvg backend fit: triangles=%d work_size=%dx%d device=%s initial_l1=%.6f initial_rmse=%.6f blur_sigma=%.1f->%.1f"
+        % (len(shapes), work_width, work_height, device, initial_l1, initial_rmse, args.blur_sigma_start, args.blur_sigma_end),
         flush=True,
     )
 
     for step in range(int(args.steps)):
         one_based = step + 1
+        progress = float(step) / float(max(1, int(args.steps) - 1))
+        blur_sigma = float(args.blur_sigma_start) + (float(args.blur_sigma_end) - float(args.blur_sigma_start)) * progress
+
         points_optimizer.zero_grad(set_to_none=True)
         color_optimizer.zero_grad(set_to_none=True)
 
         prediction = _render_diffvg(pydiffvg, shapes, shape_groups, work_width, work_height, background_rgb, seed=seed + one_based, samples=args.samples)
-        loss = F.l1_loss(prediction, target_work)
+        blurred_prediction = _gaussian_blur(prediction, blur_sigma)
+        blurred_target = _gaussian_blur(target_work, blur_sigma)
+        l1_loss = F.l1_loss(blurred_prediction, blurred_target)
+        if lpips_model is not None and (args.lpips_cadence <= 1 or one_based % args.lpips_cadence == 0):
+            pred_lpips = blurred_prediction * 2.0 - 1.0
+            tgt_lpips = blurred_target * 2.0 - 1.0
+            lpips_loss = lpips_model(pred_lpips, tgt_lpips).mean()
+            loss = (1.0 - args.lpips_weight) * l1_loss + args.lpips_weight * lpips_loss
+        else:
+            loss = l1_loss
         loss.backward()
         points_optimizer.step()
         color_optimizer.step()
@@ -485,11 +531,12 @@ def main(argv: List[str] | None = None) -> int:
                     "eval_l1": current_l1,
                     "eval_rmse": current_rmse,
                     "best_l1": best_l1,
+                    "blur_sigma": blur_sigma,
                 }
             )
             print(
-                "[step %d/%d] train_l1=%.6f eval_l1=%.6f eval_rmse=%.6f best_l1=%.6f"
-                % (one_based, int(args.steps), float(loss.detach().cpu().item()), current_l1, current_rmse, best_l1),
+                "[step %d/%d] train_l1=%.6f eval_l1=%.6f eval_rmse=%.6f best_l1=%.6f blur_sigma=%.2f"
+                % (one_based, int(args.steps), float(loss.detach().cpu().item()), current_l1, current_rmse, best_l1, blur_sigma),
                 flush=True,
             )
 
@@ -509,6 +556,8 @@ def main(argv: List[str] | None = None) -> int:
             "seed": seed,
             "device": str(device),
             "init_mode": args.init_mode,
+            "blur_sigma_start": args.blur_sigma_start,
+            "blur_sigma_end": args.blur_sigma_end,
             "random_alpha": args.random_alpha if args.init_mode in ("random", "partial_random") else None,
             "random_min_size": args.random_min_size if args.init_mode in ("random", "partial_random") else None,
             "random_max_size": args.random_max_size if args.init_mode in ("random", "partial_random") else None,

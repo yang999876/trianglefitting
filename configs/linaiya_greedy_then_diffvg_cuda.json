@@ -1,6 +1,6 @@
 {
-  "input": "assets/linaiya.png",
-  "output": "out/linaiya_greedy_then_diffvg",
+  "input": "assets/zhongli_030.png",
+  "output": "out/zhongli_greedy_then_diffvg",
   "greedy": {
     "placer": "hill_climb",
     "work_size": 512,

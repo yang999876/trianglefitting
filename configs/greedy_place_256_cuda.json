@@ -1,6 +1,6 @@
 {
-  "input": "assets/cat.png",
-  "output": "out/greed_cat_v4",
+  "input": "assets/zhongli_030.png",
+  "output": "out/zhongli_v1",
   "placer": "hill_climb",
   "work_size": 512,
   "device": "cuda",
@@ -8,6 +8,7 @@
   "candidate_count": 1024,
   "max_shape_mutations": 512,
   "seed": -1,
+  "background_rgb": null,
   "shape_bounds": [0.0, 0.0, 1.0, 1.0],
   "min_half_base_fraction": 0.00390625,
   "max_half_base_fraction": 0.125,
