@@ -1,0 +1,3 @@
+[submodule "third-party/geometrize"]
+	path = third-party/geometrize
+	url = https://github.com/yang999876/geometrize.git
