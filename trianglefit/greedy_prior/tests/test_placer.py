@@ -108,6 +108,7 @@ class GreedyPlacerTests(unittest.TestCase):
                         "candidate_count": 64,
                         "background_rgb": [255, 255, 255],
                         "attention_mask": "out/attention/attention_mask.pt",
+                        "resolution_schedule": [{"until_fraction": 1.0, "work_size": 512, "attention": True}],
                         "shape_bounds": [0.1, 0.2, 0.8, 0.9],
                     }
                 ),
@@ -121,6 +122,7 @@ class GreedyPlacerTests(unittest.TestCase):
         self.assertEqual(args.candidate_count, 64)
         self.assertEqual(args.background_rgb, [255, 255, 255])
         self.assertEqual(args.attention_mask, "out/attention/attention_mask.pt")
+        self.assertEqual(args.resolution_schedule, [{"until_fraction": 1.0, "work_size": 512, "attention": True}])
         self.assertEqual(args.shape_bounds, [0.1, 0.2, 0.8, 0.9])
 
 

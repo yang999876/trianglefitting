@@ -1,0 +1,39 @@
+{
+  "input": "assets/zhongli_030.png",
+  "output": "out/zhongli_greedy_dynamic_attention",
+  "placer": "hill_climb",
+  "device": "cuda",
+  "num_triangles": 300,
+  "candidate_count": 1024,
+  "max_shape_mutations": 512,
+  "background_rgb": null,
+  "seed": -1,
+  "attention_mask": "out/zhongli_attention_mask/attention_mask.pt",
+  "resolution_schedule": [
+    {
+      "until_fraction": 0.2,
+      "work_size": 256,
+      "attention": false
+    },
+    {
+      "until_fraction": 0.5,
+      "work_size": 512,
+      "attention": false
+    },
+    {
+      "until_fraction": 1.0,
+      "work_size": 1024,
+      "attention": true
+    }
+  ],
+  "shape_bounds": [0.0, 0.0, 1.0, 1.0],
+  "min_half_base_fraction": 0.00390625,
+  "max_half_base_fraction": 0.125,
+  "min_height_fraction": 0.00390625,
+  "max_height_fraction": 0.25,
+  "center_mutation_fraction": 0.125,
+  "size_mutation_fraction": 0.0625,
+  "angle_mutation_degrees": 16.0,
+  "metrics_every": 10,
+  "progress_every": 25
+}
