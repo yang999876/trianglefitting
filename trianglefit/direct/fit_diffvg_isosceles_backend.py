@@ -24,7 +24,8 @@ from .fit_geometrize_json import (
     resolve_seed,
 )
 from .io import load_image, save_image
-from .utils import ensure_dir, inverse_softplus, serialize_json
+from .utils import ensure_dir, inverse_sigmoid, inverse_softplus, serialize_json
+from ..greedy_prior.placer import HillClimbTrianglePlacer, ShapeBounds, TrianglePlacementConfig
 
 
 def _import_diffvg():
@@ -109,6 +110,181 @@ def _render_diffvg_isosceles(
     return image.permute(2, 0, 1).unsqueeze(0).clamp(0.0, 1.0)
 
 
+@torch.no_grad()
+def _render_hard_isosceles(
+    table: PixelTriangleTable,
+    width: int,
+    height: int,
+    exclude_indices: set[int] | None = None,
+) -> torch.Tensor:
+    centers, half_base, tri_height, theta, rgb, alpha = table.decoded()
+    device = centers.device
+    dtype = centers.dtype
+    image = table.background_rgb.to(device=device, dtype=dtype).expand(1, 3, height, width).clone()
+    y = torch.arange(height, device=device, dtype=dtype) + 0.5
+    x = torch.arange(width, device=device, dtype=dtype) + 0.5
+    grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+    exclude_indices = exclude_indices or set()
+    for index in range(int(centers.shape[0])):
+        if index in exclude_indices:
+            continue
+        dx = grid_x - centers[index, 0]
+        dy = grid_y - centers[index, 1]
+        cos_theta = torch.cos(theta[index, 0])
+        sin_theta = torch.sin(theta[index, 0])
+        x_rot = cos_theta * dx + sin_theta * dy
+        y_rot = -sin_theta * dx + cos_theta * dy
+        h = tri_height[index, 0].clamp_min(1e-4)
+        hb = half_base[index, 0].clamp_min(1e-4)
+        y_from_top = y_rot + (h * 0.5)
+        half_base_at_y = y_from_top * (hb / h)
+        mask = (
+            (y_from_top >= 0.0)
+            & (y_rot <= (h * 0.5))
+            & (x_rot >= -half_base_at_y)
+            & (x_rot <= half_base_at_y)
+        ).to(dtype=dtype).view(1, 1, height, width)
+        layer_alpha = (mask * alpha[index].view(1, 1, 1, 1)).clamp(0.0, 1.0)
+        color = rgb[index].view(1, 3, 1, 1)
+        image = image * (1.0 - layer_alpha) + color * layer_alpha
+    return image.clamp(0.0, 1.0)
+
+
+def _image_l1_tensor(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    return torch.mean(torch.abs(first - second))
+
+
+@torch.no_grad()
+def _lowest_contribution_indices(
+    table: PixelTriangleTable,
+    target: torch.Tensor,
+    width: int,
+    height: int,
+    count: int,
+) -> Tuple[List[int], torch.Tensor, List[float]]:
+    count = min(max(0, int(count)), table.count)
+    if count == 0:
+        return [], _render_hard_isosceles(table, width=width, height=height), []
+
+    current = _render_hard_isosceles(table, width=width, height=height)
+    base_l1 = _image_l1_tensor(current, target)
+    contributions: List[float] = []
+    for index in range(table.count):
+        without = _render_hard_isosceles(table, width=width, height=height, exclude_indices={index})
+        removed_l1 = _image_l1_tensor(without, target)
+        contributions.append(float((removed_l1 - base_l1).detach().cpu().item()))
+
+    ranked = sorted(range(table.count), key=lambda item: contributions[item])
+    selected = ranked[:count]
+    without_selected = _render_hard_isosceles(table, width=width, height=height, exclude_indices=set(selected))
+    return selected, without_selected, contributions
+
+
+@torch.no_grad()
+def _sample_residual_bounds(
+    target: torch.Tensor,
+    current: torch.Tensor,
+    bounds_fraction: float,
+    generator: torch.Generator,
+) -> ShapeBounds:
+    _, _, height, width = target.shape
+    residual = torch.mean(torch.abs(target - current), dim=1).view(-1)
+    if float(residual.sum().detach().cpu().item()) <= 1e-12:
+        flat_index = torch.randint(0, residual.numel(), (1,), device=target.device, generator=generator)
+    else:
+        flat_index = torch.multinomial(residual.clamp_min(0.0), 1, replacement=True, generator=generator)
+    point = int(flat_index.detach().cpu().item())
+    y = point // width
+    x = point % width
+    fraction = max(float(bounds_fraction), 1.0 / float(max(width, height)))
+    half_w = max(2.0, float(width) * fraction * 0.5)
+    half_h = max(2.0, float(height) * fraction * 0.5)
+    x_min = max(0.0, (float(x) - half_w) / float(width))
+    y_min = max(0.0, (float(y) - half_h) / float(height))
+    x_max = min(1.0, (float(x) + half_w) / float(width))
+    y_max = min(1.0, (float(y) + half_h) / float(height))
+    return ShapeBounds.from_values((x_min, y_min, x_max, y_max))
+
+
+@torch.no_grad()
+def _write_placed_triangle_to_slot(table: PixelTriangleTable, index: int, triangle) -> None:
+    device = table.centers_px.device
+    dtype = table.centers_px.dtype
+    table.centers_px[index].copy_(torch.tensor([triangle.cx, triangle.cy], device=device, dtype=dtype))
+    table.half_base_raw[index].copy_(inverse_softplus(torch.tensor([triangle.half_base], device=device, dtype=dtype)))
+    table.height_raw[index].copy_(inverse_softplus(torch.tensor([triangle.height], device=device, dtype=dtype)))
+    table.theta_rad[index].copy_(torch.tensor([triangle.theta], device=device, dtype=dtype))
+    table.rgb_logits[index].copy_(inverse_sigmoid(torch.tensor(triangle.rgb, device=device, dtype=dtype)))
+    table.alpha[index].fill_(1.0)
+
+
+def _rebirth_low_contribution_triangles(
+    table: PixelTriangleTable,
+    target: torch.Tensor,
+    width: int,
+    height: int,
+    count: int,
+    candidate_count: int,
+    max_shape_mutations: int,
+    bounds_fraction: float,
+    seed: int,
+    round_index: int,
+) -> dict:
+    selected, current, contributions = _lowest_contribution_indices(
+        table=table,
+        target=target,
+        width=width,
+        height=height,
+        count=count,
+    )
+    if not selected:
+        return {"indices": [], "before_l1": _l1(current, target), "after_l1": _l1(current, target)}
+
+    before_l1 = _l1(current, target)
+    generator = torch.Generator(device=target.device)
+    generator.manual_seed(int(seed) + 1_000_003 + int(round_index) * 65_537)
+    placer = HillClimbTrianglePlacer()
+    reborn = []
+    for offset, slot_index in enumerate(selected):
+        bounds = _sample_residual_bounds(
+            target=target,
+            current=current,
+            bounds_fraction=bounds_fraction,
+            generator=generator,
+        )
+        config = TrianglePlacementConfig(
+            num_triangles=1,
+            candidate_count=int(candidate_count),
+            max_shape_mutations=int(max_shape_mutations),
+            candidate_chunk_size=max(1, min(int(candidate_count), 256)),
+            seed=int(seed) + int(round_index) * 10_000 + offset,
+            shape_bounds=bounds,
+            background_rgb=tuple(float(value) for value in table.background_rgb.detach().cpu().view(3)),
+        )
+        result = placer.fit(target=target, config=config, initial_image=current)
+        if not result.triangles:
+            continue
+        triangle = result.triangles[0]
+        _write_placed_triangle_to_slot(table, slot_index, triangle)
+        current = result.image.to(device=target.device, dtype=target.dtype)
+        reborn.append(
+            {
+                "index": int(slot_index),
+                "old_contribution_l1": float(contributions[slot_index]),
+                "bounds": bounds.to_list(),
+                "improvement_sse": float(triangle.improvement_sse),
+            }
+        )
+
+    after_l1 = _l1(current, target)
+    return {
+        "indices": [int(index) for index in selected],
+        "before_l1": before_l1,
+        "after_l1": after_l1,
+        "reborn": reborn,
+    }
+
+
 def _l1(first: torch.Tensor, second: torch.Tensor) -> float:
     return float(torch.mean(torch.abs(first.detach().cpu() - second.detach().cpu())).item())
 
@@ -158,6 +334,12 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--progress-every", type=int, default=100, help="Save progress image every N steps.")
     parser.add_argument("--max-triangles", type=int, default=None, help="Optionally keep only the first N triangles from the JSON.")
     parser.add_argument("--grad-clip", type=float, default=5.0, help="Gradient clipping max norm. 0 disables clipping.")
+    parser.add_argument("--rebirth-count", type=int, default=0, help="Number of low-contribution triangles to replace at each rebirth. 0 disables rebirth.")
+    parser.add_argument("--rebirth-every", type=int, default=100, help="Run rebirth before this many gradient steps have elapsed.")
+    parser.add_argument("--rebirth-initial", action=argparse.BooleanOptionalAction, default=False, help="Run one rebirth pass before gradient optimization.")
+    parser.add_argument("--rebirth-candidate-count", type=int, default=256, help="CUDA greedy candidates used for each reborn triangle.")
+    parser.add_argument("--rebirth-max-shape-mutations", type=int, default=512, help="CUDA greedy hill-climb mutations used for each reborn triangle.")
+    parser.add_argument("--rebirth-bounds-fraction", type=float, default=0.2, help="Local search box side length as a fraction of image size around a residual-sampled point.")
 
     if config_args.config is not None:
         with Path(config_args.config).open("r", encoding="utf-8") as handle:
@@ -198,6 +380,30 @@ def main(argv: List[str] | None = None) -> int:
 
     payload = _trim_payload(_read_geometrize_json(Path(args.init_json)), args.max_triangles)
     table = _table_from_payload(payload, work_width=work_width, work_height=work_height, device=device)
+    rebirth_history: List[dict] = []
+
+    if int(args.rebirth_count) > 0 and bool(args.rebirth_initial):
+        event = _rebirth_low_contribution_triangles(
+            table=table,
+            target=target_work,
+            width=work_width,
+            height=work_height,
+            count=int(args.rebirth_count),
+            candidate_count=int(args.rebirth_candidate_count),
+            max_shape_mutations=int(args.rebirth_max_shape_mutations),
+            bounds_fraction=float(args.rebirth_bounds_fraction),
+            seed=seed,
+            round_index=0,
+        )
+        event["step"] = 0
+        event["kind"] = "initial"
+        rebirth_history.append(event)
+        print(
+            "[rebirth initial] replaced=%d l1 %.6f -> %.6f"
+            % (len(event.get("reborn", [])), float(event["before_l1"]), float(event["after_l1"])),
+            flush=True,
+        )
+
     optimizer = torch.optim.Adam(table.optimizer_groups(geometry_lr=args.geometry_lr, color_lr=args.color_lr))
 
     with torch.no_grad():
@@ -218,6 +424,34 @@ def main(argv: List[str] | None = None) -> int:
 
     for step in range(int(args.steps)):
         one_based = step + 1
+        if (
+            int(args.rebirth_count) > 0
+            and int(args.rebirth_every) > 0
+            and step > 0
+            and step % int(args.rebirth_every) == 0
+        ):
+            event = _rebirth_low_contribution_triangles(
+                table=table,
+                target=target_work,
+                width=work_width,
+                height=work_height,
+                count=int(args.rebirth_count),
+                candidate_count=int(args.rebirth_candidate_count),
+                max_shape_mutations=int(args.rebirth_max_shape_mutations),
+                bounds_fraction=float(args.rebirth_bounds_fraction),
+                seed=seed,
+                round_index=step,
+            )
+            event["step"] = step
+            event["kind"] = "periodic"
+            rebirth_history.append(event)
+            optimizer = torch.optim.Adam(table.optimizer_groups(geometry_lr=args.geometry_lr, color_lr=args.color_lr))
+            print(
+                "[rebirth step %d] replaced=%d l1 %.6f -> %.6f"
+                % (step, len(event.get("reborn", [])), float(event["before_l1"]), float(event["after_l1"])),
+                flush=True,
+            )
+
         optimizer.zero_grad(set_to_none=True)
         prediction = _render_diffvg_isosceles(pydiffvg, table, work_width, work_height, seed=seed + one_based, samples=args.samples)
         loss = F.l1_loss(prediction, target_work)
@@ -289,6 +523,15 @@ def main(argv: List[str] | None = None) -> int:
             "best_l1": best_l1,
             "final_l1": _l1(final, loaded.working),
             "final_rmse": _rmse(final, loaded.working),
+            "rebirth": {
+                "count": int(args.rebirth_count),
+                "every": int(args.rebirth_every),
+                "initial": bool(args.rebirth_initial),
+                "candidate_count": int(args.rebirth_candidate_count),
+                "max_shape_mutations": int(args.rebirth_max_shape_mutations),
+                "bounds_fraction": float(args.rebirth_bounds_fraction),
+                "history": rebirth_history,
+            },
             "history": history,
         },
         output_dir / "metrics.json",
